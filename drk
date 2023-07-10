@@ -1,0 +1,114 @@
+import bpy
+from psd_tools import PSDImage
+
+# Vérifier si l'add-on "Import Images as Planes" est activé
+if 'io_import_images_as_planes' not in bpy.context.preferences.addons:
+    print("L'add-on 'Import Images as Planes' doit être activé pour utiliser cet add-on.")
+    sys.exit(1)
+
+# Spécifier le chemin du fichier PSD
+psd_path = "C:/Users/darko/Desktop/test oca/test.psd"
+
+# Charger le fichier PSD
+psd = PSDImage.open(psd_path)
+
+def import_layer(layer, parent, offset):
+    # Vérifier si le calque est un groupe
+    if layer.is_group():
+        # Créer un objet vide pour représenter le groupe
+        bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0, 0, offset))
+        empty = bpy.context.selected_objects[0]
+        empty.name = layer.name
+
+        # Lier l'objet vide au parent
+        empty.parent = parent
+
+        # Parcourir les calques du groupe
+        group_offset = offset
+        for child_layer in layer:
+            # Importer le calque enfant
+            group_offset = import_layer(child_layer, empty, group_offset)
+
+        return group_offset + 0.02
+
+    # Vérifier si le calque contient une image
+    if layer.topil() is not None:
+        # Convertir l'image du calque en format RGBA
+        image = layer.topil().convert("RGBA")
+
+        # Créer une texture à partir de l'image du calque
+        tex = bpy.data.textures.new(layer.name, 'IMAGE')
+        tex.image = bpy.data.images.new(layer.name, width=image.width, height=image.height)
+        tex.image.pixels = [x / 255 for x in image.tobytes()]
+
+        # Calculer la position relative du calque dans le fichier PSD
+        x = (layer.left + layer.right) / 2 / 100 - psd.width / 200
+        y = (psd.height - (layer.top + layer.bottom) / 2) / 100 - psd.height / 200
+
+        # Créer un nouveau plan pour chaque calque avec une taille adaptée aux dimensions de l'image
+        width, height = image.size
+        bpy.ops.mesh.primitive_plane_add(size=1, enter_editmode=False, align='WORLD', location=(x, y, offset))
+        plane = bpy.context.selected_objects[0]
+        plane.dimensions = (width / 100, height / 100, 0)
+
+        # Conserver le nom original du calque pour l'objet plan
+        plane.name = layer.name
+
+        # Ajouter un matériau au plan en utilisant un shader Emission pour un rendu Shadeless
+        mat = bpy.data.materials.new(name=layer.name)
+        mat.use_nodes = True
+        nodes = mat.node_tree.nodes
+        links = mat.node_tree.links
+
+        # Supprimer le nœud Principled BSDF
+        principled_node = nodes.get("Principled BSDF")
+        if principled_node is not None:
+            nodes.remove(principled_node)
+
+        output_node = nodes.get("Material Output")
+        shadeless_node = nodes.new(type='ShaderNodeGroup')
+        shadeless_node.node_tree = bpy.data.node_groups['IAP_SHADELESS']
+        transparent_node = nodes.new(type='ShaderNodeBsdfTransparent')
+        mix_node = nodes.new(type='ShaderNodeMixShader')
+        tex_node = nodes.new('ShaderNodeTexImage')
+        tex_node.image = tex.image
+        links.new(tex_node.outputs['Color'], shadeless_node.inputs[0])
+        links.new(shadeless_node.outputs[0], mix_node.inputs[2])
+        links.new(transparent_node.outputs['BSDF'], mix_node.inputs[1])
+        links.new(mix_node.outputs['Shader'], output_node.inputs['Surface'])
+
+        # Conserver la transparence du calque en utilisant les données d'alpha de l'image
+        links.new(tex_node.outputs['Alpha'], mix_node.inputs['Fac'])
+
+        # Modifier les modes de fusion et d'ombre du matériau pour utiliser Alpha Clip
+        mat.blend_method = 'CLIP'
+        mat.shadow_method = 'CLIP'
+
+        # Appliquer le matériau au plan
+        plane.data.materials.append(mat)
+
+        # Lier le plan au parent
+        plane.parent = parent
+
+    return offset + 0.02
+
+# Créer un objet vide pour lier les plans et les groupes
+bpy.ops.object.empty_add(type='PLAIN_AXES', location=(0, 0, 0))
+empty = bpy.context.selected_objects[0]
+empty.name = "PSD Planes"
+
+# Parcourir les calques du fichier PSD
+offset = 0
+for layer in psd:
+    # Importer le calque
+    offset = import_layer(layer, empty, offset)
+
+# Retourner les plans en symétrie horizontale
+empty.scale.x = -1
+
+# Effectuer une rotation de 180° sur l'ensemble du fichier PSD
+empty.rotation_euler.z = 3.14159
+
+# Sélectionner l'objet vide pour faciliter la manipulation des plans et des groupes liés
+bpy.context.view_layer.objects.active = empty
+empty.select_set(True)
